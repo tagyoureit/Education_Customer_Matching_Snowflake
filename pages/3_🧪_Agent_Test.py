@@ -259,6 +259,21 @@ def call_agent(prompt: str, conn, use_sse: bool = True, request_timeout: int = 6
     returned_thread_id = None
 
     ctype = response.headers.get('Content-Type', '')
+
+    # Helper to avoid duplicate consecutive text chunk appends (some servers emit both text.delta and delta.content)
+    def _append_text_chunk_unique(chunk_text: str):
+        try:
+            if not isinstance(chunk_text, str) or not chunk_text:
+                return
+            if text_chunks and chunk_text == text_chunks[-1]:
+                return
+            text_chunks.append(chunk_text)
+        except Exception:
+            # Fallback to simple append on unexpected types
+            try:
+                text_chunks.append(chunk_text)
+            except Exception:
+                pass
     if use_sse and 'text/event-stream' in ctype:
         import time as _time
         start_ts = _time.monotonic()
@@ -297,7 +312,7 @@ def call_agent(prompt: str, conn, use_sse: bool = True, request_timeout: int = 6
                 data_block = obj.get('data') or obj.get('delta') or obj
                 text_val = data_block.get('text') if isinstance(data_block, dict) else None
                 if isinstance(text_val, str):
-                    text_chunks.append(text_val)
+                    _append_text_chunk_unique(text_val)
                     if callable(on_event):
                         try:
                             on_event('response.text.delta', text_val)
@@ -383,7 +398,7 @@ def call_agent(prompt: str, conn, use_sse: bool = True, request_timeout: int = 6
                 if 'content' in delta:
                     for item in delta.get('content', []):
                         if item.get('type') == 'text' and item.get('text'):
-                            text_chunks.append(item['text'])
+                            _append_text_chunk_unique(item['text'])
                         elif item.get('type') == 'tool_results':
                             tr = item.get('tool_results', {})
                             tool_name = tr.get('name', '')
@@ -397,7 +412,7 @@ def call_agent(prompt: str, conn, use_sse: bool = True, request_timeout: int = 6
                                         if possible_sql:
                                             analyst_sql = possible_sql
                 elif 'text' in delta and isinstance(delta.get('text'), str):
-                    text_chunks.append(delta['text'])
+                    _append_text_chunk_unique(delta['text'])
             # else: other event types ignored for now
             # Stop streaming if we have any text or analyst SQL and we've streamed for long enough
             if (_time.monotonic() - start_ts) > sse_max_seconds:
@@ -485,6 +500,28 @@ def call_agent(prompt: str, conn, use_sse: bool = True, request_timeout: int = 6
         result_payload["debug"]["tools"] = tools_observed
     if returned_thread_id:
         result_payload["thread_id"] = returned_thread_id
+
+    # If we used a thread and have a final assistant text, append it to the thread as an assistant message
+    try:
+        if pat_token and (thread_id or returned_thread_id) and result_payload.get('text'):
+            tid = thread_id or returned_thread_id
+            url = f"https://{host}/api/v2/cortex/threads/{tid}/messages"
+            headers_pm = {
+                "Authorization": f"Bearer {pat_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            body_pm = {
+                "role": "assistant",
+                "content": [{"type": "text", "text": result_payload['text']}]
+            }
+            # Best effort, ignore failures
+            try:
+                requests.post(url, headers=headers_pm, json=body_pm, timeout=10)
+            except Exception:
+                pass
+    except Exception:
+        pass
     # If nothing useful extracted, surface body preview and parsed JSON for troubleshooting
     if not result_payload["text"] and not result_payload["analyst_sql"]:
         try:
@@ -698,6 +735,11 @@ def show_inline_edit_form_for_customer(_conn, source_pkey: str, thresholds: Dict
 
 
 def run_and_render(prompt: str, conn, use_sse: bool, timeout_sec: int, pat_token: str = None, host_override: str = None, agent_name: str = None, thread_id: str = None):
+    # Show prior history while current request streams
+    history_area = st.container()
+    with history_area:
+        render_results_area(conn)
+
     # Live streaming containers - thinking first, then response
     thinking_area = st.empty()
     live_area = st.empty()
@@ -725,8 +767,8 @@ def run_and_render(prompt: str, conn, use_sse: bool, timeout_sec: int, pat_token
                     st.write(full_display)
         elif evt_type == 'response.thinking' and isinstance(data, str):
             # Complete sentence - add to complete thinking and clear delta
-            complete_thinking = st.session_state.get('stream_thinking_complete', '')
-            complete_thinking += data
+            # Replace with the final complete thinking returned by the event to avoid duplication
+            complete_thinking = data
             st.session_state['stream_thinking_complete'] = complete_thinking
             st.session_state['stream_thinking_delta'] = ''  # Clear the delta buffer
             
@@ -769,14 +811,26 @@ def run_and_render(prompt: str, conn, use_sse: bool, timeout_sec: int, pat_token
                 on_event=_on_event,
             )
 
-    # Persist results for subsequent renders and selections
+    # Persist results (append to history) for subsequent renders
+    st.session_state['show_examples'] = False
+    # Ensure history list exists
+    if 'agent_runs' not in st.session_state or not isinstance(st.session_state['agent_runs'], list):
+        st.session_state['agent_runs'] = []
+    # Build a stable entry for this run
+    entry = {
+        'text': result.get('text') or st.session_state.get('stream_text') or None,
+        'thinking': result.get('thinking') or st.session_state.get('stream_thinking_complete') or None,
+        'analyst_sql': result.get('analyst_sql'),
+        'charts': result.get('charts') or [],
+        'tables': result.get('tables') or [],
+        'events': result.get('events') or [],
+        'debug': result.get('debug') or {},
+    }
+    st.session_state['agent_runs'].append(entry)
+    # Keep last_x for the right-side debug panels (most recent only)
     st.session_state["last_agent_result"] = result
     st.session_state['last_error'] = result.get('error')
     st.session_state['last_debug'] = result.get('debug')
-    st.session_state['last_text'] = result.get('text')
-    st.session_state['last_sql'] = result.get('analyst_sql')
-    st.session_state['show_examples'] = False
-    # After completion, do not duplicate text; final text is already streamed in live_area
 
     # If a thread id was returned by the API, store it for subsequent turns
     try:
@@ -798,6 +852,14 @@ def run_and_render(prompt: str, conn, use_sse: bool, timeout_sec: int, pat_token
     # Do not execute SQL locally; rely on server-side Agent tools only
     st.session_state['last_df'] = None
 
+    # Clear live streaming areas to avoid duplicate on-screen output once history has been persisted
+    try:
+        thinking_area.empty()
+        live_area.empty()
+        history_area.empty()
+    except Exception:
+        pass
+
 
 def render_results_area(conn):
     # Show any error/debug
@@ -808,40 +870,56 @@ def render_results_area(conn):
                 st.json(st.session_state['last_debug'])
         return
 
-    # Thinking first (final snapshot only; live stream uses thinking_area)
+    # Render full history (each run in order)
+    history = st.session_state.get('agent_runs') or []
+    for idx, ar in enumerate(history, start=1):
+        # Thinking snapshot (final) if available
+        if ar.get('thinking'):
+            with st.expander(f"Thinking ({idx})", expanded=False):
+                st.write(ar['thinking'])
 
+        # Assistant response (final text)
+        if ar.get('text'):
+            st.markdown("**Assistant response:**")
+            st.write(ar['text'])
 
-    # Don't show assistant response here - it's already streamed above
+        # Analyst SQL
+        if ar.get('analyst_sql'):
+            st.markdown("**Analyst SQL (informational):**")
+            st.code(ar['analyst_sql'], language="sql")
 
-    if st.session_state.get('last_sql'):
-        st.markdown("**Analyst SQL (informational):**")
-        st.code(st.session_state['last_sql'], language="sql")
+        # Raw events
+        if ar.get('events'):
+            with st.expander(f"Agent events (raw) [{idx}]", expanded=False):
+                st.json(ar['events'])
 
-    # All events expander (raw)
-    if st.session_state.get('last_agent_result') and st.session_state['last_agent_result'].get('events'):
-        with st.expander("Agent events (raw)", expanded=False):
-            st.json(st.session_state['last_agent_result']['events'])
+        # Charts
+        if isinstance(ar.get('charts'), list) and ar['charts']:
+            st.markdown("**Charts:**")
+            for spec in ar['charts']:
+                try:
+                    st.vega_lite_chart(spec, use_container_width=True)
+                except Exception:
+                    st.json(spec)
 
-    # Render charts and tables if provided
-    ar = st.session_state.get('last_agent_result') or {}
-    if isinstance(ar.get('charts'), list) and ar['charts']:
-        st.markdown("**Charts:**")
-        for spec in ar['charts']:
-            try:
-                st.vega_lite_chart(spec, use_container_width=True)
-            except Exception:
-                st.json(spec)
-    if isinstance(ar.get('tables'), list) and ar['tables']:
-        st.markdown("**Tables:**")
-        for tbl in ar['tables']:
-            try:
-                import numpy as _np
-                import pandas as _pd
-                data_array = _np.array(tbl.get('data') or [])
-                colnames = [c.get('name') for c in (tbl.get('result_set_meta_data') or {}).get('row_type', [])]
-                st.dataframe(_pd.DataFrame(data_array, columns=colnames), use_container_width=True)
-            except Exception:
-                st.json(tbl)
+        # Tables
+        if isinstance(ar.get('tables'), list) and ar['tables']:
+            st.markdown("**Tables:**")
+            for tbl in ar['tables']:
+                try:
+                    import pandas as _pd
+                    rows = tbl.get('data') or []
+                    meta = (tbl.get('result_set_meta_data') or {}).get('row_type', [])
+                    colnames = [c.get('name') for c in meta if isinstance(c, dict) and c.get('name')]
+
+                    if rows and isinstance(rows[0], dict):
+                        df = _pd.DataFrame(rows)
+                    else:
+                        df = _pd.DataFrame(rows, columns=colnames if colnames else None)
+
+                    st.dataframe(df, use_container_width=True)
+                except Exception:
+                    st.json(tbl)
 
     # Render persistent results table with row selection
     df = st.session_state.get('last_df')
