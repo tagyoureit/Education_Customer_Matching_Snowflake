@@ -1,0 +1,35 @@
+Do batch based on records coming in.  Then send email summary about the matches.
+
+left and right arrows on screen; show addresses next to each other;
+- new customer on LEFT; customer on right existing customer to match up to.  
+- which is the existing?? 
+below would be additional matches.
+highlight of red where things differ;
+
+buttons
+save customer form; save and next;
+
+what happens when a new customer comes in.  it has a source system (customer_id);
+Source system is salesforce, for example.  or SAP.  netsuite.
+
+give me all the systems that have this record.
+
+
+
+how else does informatica match records?
+How to showcase AI?  
+- someone dealing with a new customer not entered into mdm before.
+- 
+
+
+
+system of record is custome.customer_identifier; customer business id;
+they DON'T update the other systems; just link system of record.    
+
+
+is customer_business_id blank until 
+informatica 
+
+- pick up slack of false positive and false negatives.  
+
+give each one a confidence score.  

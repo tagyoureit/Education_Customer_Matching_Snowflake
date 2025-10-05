@@ -18,6 +18,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Redirect to the new default page for the updated schema
+st.switch_page("pages/1_Generate_Samples_and_Assign.py")
+
 # Constants
 DEFAULT_THRESHOLDS = {
     'exact': 0.995,
