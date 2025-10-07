@@ -179,7 +179,7 @@ def search_top_address_candidate(_conn, ci_row: dict) -> Optional[dict]:
         return None
 
 
-def process_unenriched_identifiers(_conn, threshold: float = 0.90, limit: int = 100, progress=None) -> Dict[str, any]:
+def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 100, progress=None) -> Dict[str, any]:
     """Process up to `limit` CUSTOMER_IDENTIFIER rows where ENRICHED_INDICATOR IS NULL.
 
     For each row:
@@ -257,9 +257,51 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.90, limit: int = 
             })
             score = (top.get('_SCORE') if isinstance(top, dict) else None) or 0.0
 
-            # Update columns per rule; if VALID also assign to top candidate so verification can compare CI vs CA
+            # Persist SEARCH_CONFIDENCE_SCORE regardless
+            cur2 = _conn.cursor()
+            try:
+                cur2.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
+                cur2.execute("USE SCHEMA PUBLIC")
+                try:
+                    cur2.execute("USE WAREHOUSE COMPUTE_WH")
+                except Exception:
+                    pass
+                cur2.execute(
+                    """
+                    UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+                    SET SEARCH_CONFIDENCE_SCORE = %s
+                    WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s
+                    """,
+                    (float(score), ci['IDENTIFIER_TYPE'], ci['IDENTIFIER_VALUE'])
+                )
+            finally:
+                try:
+                    cur2.close()
+                except Exception:
+                    pass
+
+            # Update ENRICHED_INDICATOR driven solely by search and optionally assign
             if score > threshold and isinstance(top, dict) and top.get('CUSTOMER_BUSINESS_ID'):
-                # Use existing helper to assign, compute confidence, set indicator, and populate verification
+                # Mark VALID based on search
+                cur3 = _conn.cursor()
+                try:
+                    cur3.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
+                    cur3.execute("USE SCHEMA PUBLIC")
+                    cur3.execute(
+                        """
+                        UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+                        SET ENRICHED_INDICATOR = 'VALID'
+                        WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s
+                        """,
+                        (ci['IDENTIFIER_TYPE'], ci['IDENTIFIER_VALUE'])
+                    )
+                finally:
+                    try:
+                        cur3.close()
+                    except Exception:
+                        pass
+
+                # Assign to the top candidate to compute vector similarity and verification
                 assign_ci_to_business_id(
                     _conn,
                     ci.get('IDENTIFIER_TYPE'),
@@ -268,16 +310,13 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.90, limit: int = 
                 )
                 # Ensure the in-memory row reflects the assigned BUSINESS_ID before display
                 ci['CUSTOMER_BUSINESS_ID'] = top.get('CUSTOMER_BUSINESS_ID')
+                any_valid = True
             else:
-                cur2 = _conn.cursor()
+                cur4 = _conn.cursor()
                 try:
-                    cur2.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-                    cur2.execute("USE SCHEMA PUBLIC")
-                    try:
-                        cur2.execute("USE WAREHOUSE COMPUTE_WH")
-                    except Exception:
-                        pass
-                    cur2.execute(
+                    cur4.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
+                    cur4.execute("USE SCHEMA PUBLIC")
+                    cur4.execute(
                         """
                         UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
                         SET ENRICHED_INDICATOR = 'ERROR'
@@ -287,22 +326,20 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.90, limit: int = 
                     )
                 finally:
                     try:
-                        cur2.close()
+                        cur4.close()
                     except Exception:
                         pass
 
             processed_rows.append((ci['IDENTIFIER_TYPE'], ci['IDENTIFIER_VALUE']))
 
-            is_valid = (score > threshold)
-            if is_valid:
-                any_valid = True
             results.append({
                 'ENRICHED_INDICATOR': 'VALID' if score > threshold else 'ERROR',
                 'CUSTOMER_NAME': ci.get('CUSTOMER_NAME'),
                 'CUSTOMER_BUSINESS_ID': ci.get('CUSTOMER_BUSINESS_ID'),
                 'IDENTIFIER_TYPE': ci.get('IDENTIFIER_TYPE'),
                 'CUSTOMER_FULL_DETAIL': ci.get('CUSTOMER_FULL_DETAIL'),
-                'CONFIDENCE_SCORE': score,
+                'SEARCH_CONFIDENCE_SCORE': score,
+                'CONFIDENCE_SCORE': None,  # vector similarity computed post-assignment only
                 'CREATED_TIMESTAMP': ci.get('CREATED_TIMESTAMP'),
             })
 
@@ -363,6 +400,7 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
             (customer_business_id, identifier_type, identifier_value)
         )
 
+        # Compute vector cosine similarity for this CI row
         cur.execute(
             """
             UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
@@ -374,14 +412,20 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
             (identifier_type, identifier_value)
         )
 
-        cur.execute(
-            """
-            UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
-            SET ENRICHED_INDICATOR = (CASE WHEN CONFIDENCE_SCORE > 90 THEN 'VALID' ELSE 'ERROR' END)
-            WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s AND CONFIDENCE_SCORE IS NOT NULL
-            """,
-            (identifier_type, identifier_value)
-        )
+        # Compute edit distance for assigned row
+        try:
+            cur.execute(
+                """
+                UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+                SET EDIT_DISTANCE = EDITDISTANCE(ci.CUSTOMER_FULL_DETAIL, ca.CUSTOMER_FULL_DETAIL)
+                FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS ca
+                WHERE ci.CUSTOMER_BUSINESS_ID = ca.CUSTOMER_BUSINESS_ID
+                  AND ci.IDENTIFIER_TYPE = %s AND ci.IDENTIFIER_VALUE = %s
+                """,
+                (identifier_type, identifier_value)
+            )
+        except Exception:
+            pass
 
         cur.execute(
             """

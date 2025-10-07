@@ -167,7 +167,9 @@ PHONE
 VERIFICATION_STATUS_CODE, 
 VERIFICATION_MESSAGE, 
 ENRICHED_INDICATOR,
-CONFIDENCE_SCORE,
+CONFIDENCE_SCORE,            # vector cosine similarity after assignment only
+SEARCH_CONFIDENCE_SCORE,     # Cortex Search top match score used for auto-match decision
+EDIT_DISTANCE,               # Levenshtein distance between CI vs CA full detail; only when assigned
 CUSTOMER_FULL_DETAIL,
 CUSTOMER_FULL_DETAIL_EMBEDDING VECTOR(FLOAT, 768) - 
 CREATED_TIMESTAMP, 
@@ -178,13 +180,15 @@ Notes:
 - Columns align with provided screenshots where derivable (COUNTY, VERIFICATION_* fields, etc.)
 - No PK/FK constraints (not hybrid tables)
 
-## Matching logic
-- Embeddings: AI_EMBED('snowflake-arctic-embed-m-v1.5')
-- Similarity: VECTOR_COSINE_SIMILARITY (CUSTOMER vs INCOMING_CUSTOMER)
-- Threshold routing:
-  - Auto-match: MATCH_CONFIDENCE ≥ 0.980 → insert into CUSTOMER_IDENTIFIER
-  - Needs review: 0.920 ≤ MATCH_CONFIDENCE < 0.980
-  - Not close: < 0.920
+## Matching logic (updated)
+- Embeddings: AI_EMBED('snowflake-arctic-embed-m-v1.5') computed at insert time for both CI and CA; never recomputed.
+- Search: SNOWFLAKE.CORTEX.SEARCH_PREVIEW over address index returns top candidates and search score.
+- Decision driver: SEARCH_CONFIDENCE_SCORE only.
+  - Auto-match: SEARCH_CONFIDENCE_SCORE > 0.80 → assign CI to top candidate CBID.
+  - Error: SEARCH_CONFIDENCE_SCORE ≤ 0.80 → set ENRICHED_INDICATOR = 'ERROR'.
+- Post-assignment metrics (for assigned rows only):
+  - CONFIDENCE_SCORE = VECTOR_COSINE_SIMILARITY(ca.embedding, ci.embedding)
+  - EDIT_DISTANCE = EDITDISTANCE(ci.CUSTOMER_FULL_DETAIL, ca.CUSTOMER_FULL_DETAIL)
 
 ## Batch pipeline (Streams/Tasks)
 - Stream on incoming identifiers or staged loads for new/updated rows

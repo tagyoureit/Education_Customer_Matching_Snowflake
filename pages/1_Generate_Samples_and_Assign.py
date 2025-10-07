@@ -100,12 +100,12 @@ def main():
 
     st.divider()
     st.caption(
-        f"Step 2: Process all rows with ENRICHED_INDICATOR IS NULL using Cortex cosine similarity. "
+        f"Step 2: Automatic matching via Cortex Search (uses search confidence score). "
         f"{'✅' if st.session_state.step2_done else ''}"
     )
     proc_cols = st.columns([1,1,2])
     with proc_cols[0]:
-        threshold = st.number_input("Threshold", value=0.90, min_value=0.0, max_value=1.0, step=0.01, format="%.2f")
+        threshold = st.number_input("Search threshold", value=0.80, min_value=0.0, max_value=1.0, step=0.01, format="%.2f")
     with proc_cols[1]:
         limit = st.number_input("Max rows", value=100, min_value=1, max_value=10000, step=10)
     if st.button("Process All Unenriched", use_container_width=True):

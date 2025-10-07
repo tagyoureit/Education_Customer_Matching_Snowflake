@@ -293,7 +293,7 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
             (customer_business_id, identifier_type, identifier_value)
         )
 
-        # 2) Recompute confidence for this CI row
+        # 2) Recompute vector cosine similarity for this CI row
         cur.execute(
             """
             UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
@@ -305,15 +305,20 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
             (identifier_type, identifier_value)
         )
 
-        # 3) Update enriched indicator
-        cur.execute(
-            """
-            UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
-            SET ENRICHED_INDICATOR = (CASE WHEN CONFIDENCE_SCORE > 0.90 THEN 'VALID' ELSE 'ERROR' END)
-            WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s AND CONFIDENCE_SCORE IS NOT NULL
-            """,
-            (identifier_type, identifier_value)
-        )
+        # 3) Compute EDIT_DISTANCE for this CI row
+        try:
+            cur.execute(
+                """
+                UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+                SET EDIT_DISTANCE = EDITDISTANCE(ci.CUSTOMER_FULL_DETAIL, ca.CUSTOMER_FULL_DETAIL)
+                FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS ca
+                WHERE ci.CUSTOMER_BUSINESS_ID = ca.CUSTOMER_BUSINESS_ID
+                  AND ci.IDENTIFIER_TYPE = %s AND ci.IDENTIFIER_VALUE = %s
+                """,
+                (identifier_type, identifier_value)
+            )
+        except Exception:
+            pass
 
         # 4) Populate verification message for this specific row
         cur.execute(
