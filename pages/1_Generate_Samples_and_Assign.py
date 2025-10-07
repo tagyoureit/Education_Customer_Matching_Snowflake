@@ -1,5 +1,4 @@
 import os
-import json
 import toml
 import streamlit as st
 import snowflake.connector

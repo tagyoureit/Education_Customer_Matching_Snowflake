@@ -81,7 +81,7 @@ Create a streamlined demo that processes new incoming customers in Snowflake, au
 
       -- Set enriched_indicator for current CI
       UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
-      SET enriched_indicator = (CASE WHEN confidence_score > 0.95 THEN 'VALID' ELSE 'ERROR' END)
+      SET enriched_indicator = (CASE WHEN confidence_score > 0.90 THEN 'VALID' ELSE 'ERROR' END)
       WHERE confidence_score IS NOT NULL
         AND /* filter to current CI row */ identifier_type = :IDENTIFIER_TYPE AND identifier_value = :IDENTIFIER_VALUE;
       ```
@@ -179,7 +179,7 @@ Notes:
 - No PK/FK constraints (not hybrid tables)
 
 ## Matching logic
-- Embeddings: SNOWFLAKE.CORTEX.EMBED_TEXT_768('snowflake-arctic-embed-m')
+- Embeddings: AI_EMBED('snowflake-arctic-embed-m-v1.5')
 - Similarity: VECTOR_COSINE_SIMILARITY (CUSTOMER vs INCOMING_CUSTOMER)
 - Threshold routing:
   - Auto-match: MATCH_CONFIDENCE ≥ 0.980 → insert into CUSTOMER_IDENTIFIER
@@ -187,17 +187,18 @@ Notes:
   - Not close: < 0.920
 
 ## Batch pipeline (Streams/Tasks)
-- Stream on INCOMING_CUSTOMER for new/updated rows
-- Task A: compute embeddings if null → similarity search → upsert CUSTOMER_MATCH_RESULTS
-- Task B: auto-associate high-confidence → insert CUSTOMER_IDENTIFIER rows
+- Stream on incoming identifiers or staged loads for new/updated rows
+- Task A: compute embeddings if null → perform similarity (Cortex Search) for assignments
+- Task B: auto-associate high-confidence → update CUSTOMER_IDENTIFIER rows
 - Task C: send summary email via SYSTEM$SEND_EMAIL (last)
 
 ## Agent (Cortex Agents)
 - Template: https://github.com/Snowflake-Labs/sfguide-getting-started-with-cortex-agents
 - Tools:
-  - cortex_analyst_text_to_sql over semantic model for CUSTOMER/INCOMING_CUSTOMER/CUSTOMER_MATCH_RESULTS
-  - Update_Test_Record: `MDM_CUSTOMER_MATCHING.PUBLIC.UPDATE_TEST_RECORD`
-  - Get_AI_Analysis: `MDM_CUSTOMER_MATCHING.PUBLIC.GET_AI_ANALYSIS`
+  - cortex_analyst_text_to_sql over semantic model `@customer_matching_semantic_model.yaml`
+  - Assign_Identifier_To_Business_Id, CREATE_AND_ASSIGN_NEW_CUSTOMER_ADDRESS_FROM_CI,
+    GENERATE_CUSTOMER_SAMPLES, POPULATE_VERIFICATION_MESSAGE_SQL,
+    PROCESS_IDENTIFIER_ASSIGN_OR_ERROR, SEARCH_ADDRESS_CANDIDATES_SP
 - Resources: warehouse execution, semantic model stage path, stored program identifiers
 
 ## Semantic model

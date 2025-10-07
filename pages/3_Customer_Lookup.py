@@ -53,7 +53,7 @@ def cortex_search_top3(_conn, name_query: str):
             return []
         cur = _conn.cursor()
         try:
-            cur.execute("USE ROLE SYSADMIN")
+            cur.execute("USE ROLE MDM_CUSTOMER_MATCHING_ROLE")
         except Exception:
             pass
         cur.execute("USE WAREHOUSE COMPUTE_WH")

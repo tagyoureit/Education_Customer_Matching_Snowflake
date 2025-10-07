@@ -1,0 +1,154 @@
+-- Load data from local CSV files into target tables
+-- Reference: @Snowflake Docs
+--
+-- NOTE: This file uses PUT commands which must be run from Snow CLI (not supported in all clients)
+-- Run from the project root directory: snow sql -f SQL/08_LOAD_FROM_STAGE.sql
+
+USE ROLE MDM_CUSTOMER_MATCHING_ROLE;
+USE DATABASE MDM_CUSTOMER_MATCHING;
+USE SCHEMA PUBLIC;
+
+-- Step 1: Upload local CSV files to stage (files are already gzipped)
+PUT file://data/customer_address.csv @MDM_DEMO_STAGE/data/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
+PUT file://data/customer_identifier.csv @MDM_DEMO_STAGE/data/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
+PUT file://data/public_schools.csv @MDM_DEMO_STAGE/data/ AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
+
+-- Step 2: Load CUSTOMER_ADDRESS from gzipped CSV (excluding embedding column - will be regenerated)
+COPY INTO MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS (
+    CUSTOMER_BUSINESS_ID,
+    CUSTOMER_NAME,
+    ADDRESS_LINE_1,
+    CITY,
+    POSTAL_CODE,
+    STATE,
+    ADDRESS_LINE_2,
+    COUNTRY,
+    COUNTY,
+    CUSTOMER_FULL_DETAIL,
+    PHONE,
+    POSTALCODE_EXTENSION
+)
+FROM @MDM_DEMO_STAGE/data/customer_address.csv
+FILE_FORMAT = (
+    TYPE = CSV
+    FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+    SKIP_HEADER = 1
+    NULL_IF = ('NULL', 'null', '')
+    EMPTY_FIELD_AS_NULL = TRUE
+)
+ON_ERROR = CONTINUE;
+
+-- Step 3: Load CUSTOMER_IDENTIFIER from gzipped CSV (excluding embedding column - will be regenerated)
+-- Using transformation to parse VERIFICATION_MESSAGE JSON
+COPY INTO MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER (
+    CUSTOMER_BUSINESS_ID,
+    CUSTOMER_NAME,
+    ADDRESS_LINE_1,
+    CITY,
+    POSTAL_CODE,
+    STATE,
+    ADDRESS_LINE_2,
+    COUNTRY,
+    COUNTY,
+    CUSTOMER_FULL_DETAIL,
+    PHONE,
+    POSTALCODE_EXTENSION,
+    IDENTIFIER_TYPE,
+    IDENTIFIER_VALUE,
+    ENRICHED_INDICATOR,
+    CONFIDENCE_SCORE,
+    VERIFICATION_MESSAGE,
+    VERIFICATION_STATUS_CODE,
+    ADDRESS_ROLE,
+    CREATED_TIMESTAMP,
+    UPDATED_TIMESTAMP
+)
+FROM (
+    SELECT
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+        $16, -- Changed this from TRY_PARSE_JSON, assuming CSV is flat
+        $17, TRY_TO_NUMBER($18), $19,
+        TRY_TO_TIMESTAMP_NTZ($20), -- Using NTZ is often safer
+        TRY_TO_TIMESTAMP_NTZ($21)
+    FROM @MDM_DEMO_STAGE/data/customer_identifier.csv
+)
+FILE_FORMAT = (
+    TYPE = CSV
+    FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+    SKIP_HEADER = 1
+    NULL_IF = ('NULL', 'null', '')
+    EMPTY_FIELD_AS_NULL = TRUE
+)
+ON_ERROR = CONTINUE;
+
+COPY INTO MDM_CUSTOMER_MATCHING.PUBLIC.PUBLIC_SCHOOLS 
+FROM @MDM_DEMO_STAGE/data/public_schools.csv
+FILE_FORMAT = (
+    TYPE = CSV
+    FIELD_OPTIONALLY_ENCLOSED_BY = '"'
+    SKIP_HEADER = 1
+    NULL_IF = ('NULL', 'null', '')
+    EMPTY_FIELD_AS_NULL = TRUE
+)
+ON_ERROR = CONTINUE;
+
+-- Build CUSTOMER_FULL_DETAIL for CUSTOMER_IDENTIFIER (skip NULL/blank parts)
+/* UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+SET CUSTOMER_FULL_DETAIL = RTRIM(
+  ARRAY_TO_STRING(
+    ARRAY_CONSTRUCT_COMPACT(
+      IFF(TRIM(ci.CUSTOMER_NAME) = '', NULL, TRIM(ci.CUSTOMER_NAME)),
+      IFF(TRIM(ci.ADDRESS_LINE_1) = '', NULL, TRIM(ci.ADDRESS_LINE_1)),
+      IFF(TRIM(ci.ADDRESS_LINE_2) = '', NULL, TRIM(ci.ADDRESS_LINE_2)),
+      IFF(TRIM(ci.CITY) = '', NULL, TRIM(ci.CITY)),
+      IFF(TRIM(ci.STATE) = '', NULL, TRIM(ci.STATE)),
+      IFF(TRIM(ci.POSTAL_CODE) = '', NULL, TRIM(ci.POSTAL_CODE))
+    ),
+    ', '
+  )
+)
+WHERE ci.CUSTOMER_FULL_DETAIL IS NULL OR TRIM(ci.CUSTOMER_FULL_DETAIL) = ''; */
+
+-- Populate embeddings for CUSTOMER_IDENTIFIER and CUSTOMER_ADDRESS where missing
+UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+SET CUSTOMER_FULL_DETAIL_EMBEDDING = AI_EMBED('snowflake-arctic-embed-m-v1.5', CUSTOMER_FULL_DETAIL)
+WHERE CUSTOMER_FULL_DETAIL_EMBEDDING IS NULL AND CUSTOMER_FULL_DETAIL IS NOT NULL;
+
+UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS
+SET CUSTOMER_FULL_DETAIL_EMBEDDING = AI_EMBED('snowflake-arctic-embed-m-v1.5', CUSTOMER_FULL_DETAIL)
+WHERE CUSTOMER_FULL_DETAIL_EMBEDDING IS NULL AND CUSTOMER_FULL_DETAIL IS NOT NULL;
+
+-- Compute confidence scores where both embeddings exist
+UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+SET confidence_score = VECTOR_COSINE_SIMILARITY(ca.customer_full_detail_embedding, ci.customer_full_detail_embedding)
+FROM MDM_CUSTOMER_MATCHING.PUBLIC.customer_address ca
+WHERE ci.customer_business_id = ca.customer_business_id
+  AND ci.customer_full_detail_embedding IS NOT NULL
+  AND ca.customer_full_detail_embedding IS NOT NULL;
+
+-- Step 4: Display load results
+SELECT 'CUSTOMER_ADDRESS rows loaded: ' || COUNT(*) AS RESULT FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS;
+SELECT 'CUSTOMER_IDENTIFIER rows loaded: ' || COUNT(*) AS RESULT FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER;
+
+
+-- Step 5: Align CUSTOMER_BUSINESS_ID_SEQ to next number after loaded data
+-- @Snowflake Docs: Snowflake Scripting (BEGIN/END, LET, EXECUTE IMMEDIATE), ALTER SEQUENCE, SUBSTR, TO_NUMBER, REGEXP_LIKE
+USE DATABASE MDM_CUSTOMER_MATCHING;
+USE SCHEMA PUBLIC;
+
+BEGIN
+  LET next_num NUMBER := (
+    SELECT COALESCE(
+             MAX(TRY_TO_NUMBER(SUBSTR(CUSTOMER_BUSINESS_ID, 4, 9))),
+             0
+           ) + 1
+    FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS
+    WHERE CUSTOMER_BUSINESS_ID IS NOT NULL
+      AND REGEXP_LIKE(CUSTOMER_BUSINESS_ID, '^CUS[0-9]{9}[0-9A-Z]$')
+  );
+
+  EXECUTE IMMEDIATE 'CREATE OR REPLACE SEQUENCE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_BUSINESS_ID_SEQ\n'
+    || '  START = ' || next_num || '\n'
+    || '  INCREMENT = 1\n'
+    || '  COMMENT = ''Sequence to generate the numeric component for CUSTOMER_BUSINESS_ID''';
+END;

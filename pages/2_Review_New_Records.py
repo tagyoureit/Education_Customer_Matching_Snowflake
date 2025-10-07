@@ -10,7 +10,7 @@ import os
 import toml
 import snowflake.connector
 import json
-import pandas as _pd
+ 
 
 # Page configuration
 st.set_page_config(
@@ -67,94 +67,7 @@ def get_snowflake_connection():
         # Defer error surfacing until we actually need the connection in later steps
         return None
 
-
-def render_readonly_form(prefix: str, data: dict):
-    """Render a read-only customer form with a consistent layout.
-
-    Parameters
-    ----------
-    prefix : str
-        A short prefix for field keys to avoid collisions across columns
-    data : dict
-        Dictionary with keys matching expected fields; values displayed read-only
-    """
-
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.text_input("Customer Name", value=data.get('CUSTOMER_NAME', ''), key=f"{prefix}_NAME", disabled=True)
-    with col2:
-        st.text_input("Phone", value=data.get('PHONE', ''), key=f"{prefix}_PHONE", disabled=True)
-
-    st.text_input("Address Line 1", value=data.get('ADDRESS_LINE_1', ''), key=f"{prefix}_ADDR1", disabled=True)
-    st.text_input("Address Line 2", value=data.get('ADDRESS_LINE_2', ''), key=f"{prefix}_ADDR2", disabled=True)
-
-    col3, col4, col5 = st.columns([2, 1, 1])
-    with col3:
-        st.text_input("City", value=data.get('CITY', ''), key=f"{prefix}_CITY", disabled=True)
-    with col4:
-        st.text_input("State", value=data.get('STATE', ''), key=f"{prefix}_STATE", disabled=True)
-    with col5:
-        st.text_input("Postal Code", value=data.get('POSTAL_CODE', ''), key=f"{prefix}_POSTAL", disabled=True)
-
-    col6, col7 = st.columns([1, 1])
-    with col6:
-        st.text_input("PostalCode Extension", value=data.get('POSTALCODE_EXTENSION', ''), key=f"{prefix}_POSTALX", disabled=True)
-    with col7:
-        st.text_input("Country", value=data.get('COUNTRY', ''), key=f"{prefix}_COUNTRY", disabled=True)
-
-
-def get_first_unassigned_ci(_conn):
-    """Return the newest CUSTOMER_IDENTIFIER row where CUSTOMER_BUSINESS_ID IS NULL.
-
-    Ordering: CREATED_TIMESTAMP DESC (newest first).
-    """
-    try:
-        if _conn is None:
-            return None
-        cur = _conn.cursor()
-        # Always set context explicitly per guidelines
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
-        cur.execute(
-            """
-            SELECT 
-                IDENTIFIER_TYPE,
-                IDENTIFIER_VALUE,
-                CUSTOMER_NAME,
-                ADDRESS_LINE_1,
-                ADDRESS_LINE_2,
-                CITY,
-                COUNTY,
-                STATE,
-                POSTAL_CODE,
-                POSTALCODE_EXTENSION,
-                COUNTRY,
-                PHONE,
-                CUSTOMER_FULL_DETAIL,
-                CREATED_TIMESTAMP
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
-            WHERE CUSTOMER_BUSINESS_ID IS NULL
-            ORDER BY CREATED_TIMESTAMP DESC
-            LIMIT 1
-            """
-        )
-        row = cur.fetchone()
-        cur.close()
-        if not row:
-            return None
-        columns = [
-            'IDENTIFIER_TYPE', 'IDENTIFIER_VALUE', 'CUSTOMER_NAME', 'ADDRESS_LINE_1',
-            'ADDRESS_LINE_2', 'CITY', 'COUNTY', 'STATE', 'POSTAL_CODE',
-            'POSTALCODE_EXTENSION', 'COUNTRY', 'PHONE', 'CUSTOMER_FULL_DETAIL',
-            'CREATED_TIMESTAMP'
-        ]
-        return dict(zip(columns, row))
-    except Exception:
-        return None
+ 
 
 
 def get_top3_candidates_for_ci(_conn, ci_row: dict):
@@ -396,7 +309,7 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
         cur.execute(
             """
             UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
-            SET ENRICHED_INDICATOR = (CASE WHEN CONFIDENCE_SCORE > 0.95 THEN 'VALID' ELSE 'ERROR' END)
+            SET ENRICHED_INDICATOR = (CASE WHEN CONFIDENCE_SCORE > 0.90 THEN 'VALID' ELSE 'ERROR' END)
             WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s AND CONFIDENCE_SCORE IS NOT NULL
             """,
             (identifier_type, identifier_value)
@@ -579,7 +492,7 @@ def create_new_id_and_assign(_conn, ci_row: dict):
             cur.execute(
                 """
                 UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS
-                SET CUSTOMER_FULL_DETAIL_EMBEDDING = SNOWFLAKE.CORTEX.EMBED_TEXT_768('snowflake-arctic-embed-m', CUSTOMER_FULL_DETAIL)
+                SET CUSTOMER_FULL_DETAIL_EMBEDDING = AI_EMBED('snowflake-arctic-embed-m-v1.5', CUSTOMER_FULL_DETAIL)
                 WHERE CUSTOMER_BUSINESS_ID = %s
                 """,
                 (new_id,)

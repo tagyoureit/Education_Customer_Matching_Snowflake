@@ -4,7 +4,7 @@
 -- Inserts back into MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
 -- Reference: @Snowflake Docs
 
-USE ROLE SYSADMIN;
+USE ROLE MDM_CUSTOMER_MATCHING_ROLE;
 USE DATABASE MDM_CUSTOMER_MATCHING;
 USE SCHEMA PUBLIC;
 
@@ -295,7 +295,7 @@ var insertSql = `
   )
 ) AS CUSTOMER_FULL_DETAIL,
     AI_EMBED(
-      'snowflake-arctic-embed-m',
+      'snowflake-arctic-embed-m-v1.5',
       RTRIM(
   ARRAY_TO_STRING(
     ARRAY_CONSTRUCT_COMPACT(

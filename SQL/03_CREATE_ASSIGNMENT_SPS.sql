@@ -1,7 +1,7 @@
 -- Stored procedures to support agent single-record operations
 -- Reference: @Snowflake Docs
 
-USE ROLE SYSADMIN;
+USE ROLE MDM_CUSTOMER_MATCHING_ROLE;
 USE DATABASE MDM_CUSTOMER_MATCHING;
 USE SCHEMA PUBLIC;
 
@@ -35,7 +35,7 @@ BEGIN
 
   -- 3) Update enriched indicator
   UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
-  SET ENRICHED_INDICATOR = (CASE WHEN CONFIDENCE_SCORE > 0.95 THEN 'VALID' ELSE 'ERROR' END)
+  SET ENRICHED_INDICATOR = (CASE WHEN CONFIDENCE_SCORE > 90 THEN 'VALID' ELSE 'ERROR' END)
   WHERE IDENTIFIER_TYPE = :IDENTIFIER_TYPE
     AND IDENTIFIER_VALUE = :IDENTIFIER_VALUE
     AND CONFIDENCE_SCORE IS NOT NULL;
@@ -54,7 +54,7 @@ BEGIN
       ELSE
         TRY_PARSE_JSON(
           AI_COMPLETE(
-            'mistral-large2',
+            'llama3.1-8b',
             CONCAT_WS(
               '',
               'You are given two customer records (A and B). Compare the fields case-insensitively, trimming whitespace and treating NULL as empty. ',
@@ -121,6 +121,8 @@ BEGIN
 END;
 $$;
 
+
+
 -- Wrapper around MDM_CUSTOMER_ADDRESS_SEARCH as a stored procedure (accepts dynamic inputs)
 -- Reference: @Snowflake Docs
 CREATE OR REPLACE PROCEDURE MDM_CUSTOMER_MATCHING.PUBLIC.SEARCH_ADDRESS_CANDIDATES_SP(
@@ -128,7 +130,7 @@ CREATE OR REPLACE PROCEDURE MDM_CUSTOMER_MATCHING.PUBLIC.SEARCH_ADDRESS_CANDIDAT
 )
 RETURNS VARIANT
 LANGUAGE JAVASCRIPT
-EXECUTE AS CALLER
+EXECUTE AS OWNER
 AS
 $$
 var payload = {
@@ -145,7 +147,8 @@ var payload = {
     'postal_code',
     'postalcode_extension',
     'country'
-  ]
+  ],
+  limit: 3
 };
 
 var payloadStr = JSON.stringify(payload).replace(/'/g, "''");
@@ -256,7 +259,7 @@ BEGIN
         ', '
       )
     ) AS CUSTOMER_FULL_DETAIL,
-    AI_EMBED('snowflake-arctic-embed-m', RTRIM(
+    AI_EMBED('snowflake-arctic-embed-m-v1.5', RTRIM(
       ARRAY_TO_STRING(
         ARRAY_CONSTRUCT_COMPACT(
           IFF(TRIM(:C_NAME) = '', NULL, TRIM(:C_NAME)),
