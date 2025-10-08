@@ -201,6 +201,10 @@ tables:
           - Kings College Bookstore
           - District 73 Gilford
           - Glasscock County Ink Sch District
+      - name: EDIT_DISTANCE
+        description: Levenshtein distance between two input strings. It is the number of single-character insertions, deletions, or substitutions needed to convert one string to another.  Distance between the customer_full_details in customer_address and customer_identifier tables.
+        expr: EDIT_DISTANCE
+        data_type: NUMBER(38, 0)
       - name: ENRICHED_INDICATOR
         description: Indicates whether the customer identifier has been successfully enriched with additional information or if an error occurred during the enrichment process.
         expr: ENRICHED_INDICATOR
@@ -247,6 +251,16 @@ tables:
         sample_values:
           - '1599'
           - NOT AVAILABLE
+      - name: SEARCH_CONFIDENCE_SCORE
+        synonyms:
+          - search_accuracy_score
+          - search_certainty_score
+          - search_precision_score
+          - search_reliability_score
+          - search_trust_score
+        description: A score indicating the level of confidence in the accuracy of the customer's identification from the cortex search results, with higher scores representing a higher degree of confidence.
+        expr: SEARCH_CONFIDENCE_SCORE
+        data_type: FLOAT
       - name: STATE
         description: The two-letter code representing the state where the customer is located, prefixed with the country code "US".
         expr: STATE
@@ -357,7 +371,9 @@ verified_queries:
         ci.phone,
         ci.customer_full_detail,
         ci.created_timestamp,
-        ROUND(ci.confidence_score * 100, 2) || '%' AS confidence_score
+        ROUND(ci.confidence_score * 100, 2) || '%' AS confidence_score,
+        round(ci.search_confidence_score * 100, 2) || '%' as search_confidence_score,
+        ci.edit_distance
       FROM
         customer_identifier AS ci
       WHERE
@@ -368,7 +384,7 @@ verified_queries:
         1
     use_as_onboarding_question: false
     verified_by: Russ Goldin
-    verified_at: 1759642040
+    verified_at: 1759878920
   - name: What are the bottom 3 customer addresses ranked by average confidence score of their associated customer identifiers?
     question: What are the bottom 3 customer addresses (golden records) ranked by average confidence score of their associated customer identifiers?
     sql: |-

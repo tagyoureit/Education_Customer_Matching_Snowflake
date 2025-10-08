@@ -6,6 +6,9 @@ This module contains functions that are used across multiple pages.
 import streamlit as st
 import pandas as pd
 import json
+import os
+import toml
+import snowflake.connector
 from typing import Dict, Optional, Tuple
 
 # Default thresholds - matches the original working configuration
@@ -14,6 +17,68 @@ DEFAULT_THRESHOLDS = {
     'very_close': 0.980,
     'somewhat_close': 0.920
 }
+
+
+def connect_to_snowflake():
+    """Create a Snowflake connection with session context set on connect.
+
+    Session defaults:
+    - ROLE = MDM_CUSTOMER_MATCHING_ROLE
+    - WAREHOUSE = COMPUTE_WH
+    - DATABASE = MDM_CUSTOMER_MATCHING
+    - SCHEMA = PUBLIC
+    """
+    try:
+        connections_path = os.path.expanduser("~/.snowflake/connections.toml")
+        if os.path.exists(connections_path):
+            with open(connections_path, 'r') as f:
+                config = toml.load(f)
+                default_conn = config.get('default', {})
+                connection_params = {
+                    'account': default_conn.get('account'),
+                    'user': default_conn.get('user'),
+                    'password': default_conn.get('password'),
+                }
+        else:
+            connection_params = {
+                'account': os.getenv('SNOWFLAKE_ACCOUNT'),
+                'user': os.getenv('SNOWFLAKE_USER'),
+                'password': os.getenv('SNOWFLAKE_PASSWORD'),
+            }
+
+        # Apply required session context
+        connection_params.update({
+            'role': 'MDM_CUSTOMER_MATCHING_ROLE',
+            'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH') or 'COMPUTE_WH',
+            'database': 'MDM_CUSTOMER_MATCHING',
+            'schema': 'PUBLIC',
+        })
+
+        connection_params = {k: v for k, v in connection_params.items() if v is not None}
+        return snowflake.connector.connect(**connection_params)
+    except Exception:
+        return None
+
+
+def get_session_context(_conn) -> Dict[str, Optional[str]]:
+    """Return current session context (ROLE, WAREHOUSE, DATABASE, SCHEMA)."""
+    try:
+        if _conn is None:
+            return {}
+        cur = _conn.cursor()
+        cur.execute("SELECT CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE(), CURRENT_SCHEMA()")
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return {}
+        return {
+            'ROLE': row[0],
+            'WAREHOUSE': row[1],
+            'DATABASE': row[2],
+            'SCHEMA': row[3],
+        }
+    except Exception:
+        return {}
 
 def recalculate_all_similarities(_conn, thresholds: Dict[str, float] = None) -> bool:
     """Deprecated: legacy function removed (VALID_CUSTOMERS/TEST_MATCHES not used)."""
@@ -31,12 +96,6 @@ def fetch_first_unassigned_ci(_conn) -> Optional[dict]:
         if _conn is None:
             return None
         cur = _conn.cursor()
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
         cur.execute(
             """
             SELECT 
@@ -54,7 +113,7 @@ def fetch_first_unassigned_ci(_conn) -> Optional[dict]:
                 PHONE,
                 CUSTOMER_FULL_DETAIL,
                 CREATED_TIMESTAMP
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+            FROM CUSTOMER_IDENTIFIER
             WHERE CUSTOMER_BUSINESS_ID IS NULL
             ORDER BY CREATED_TIMESTAMP DESC
             LIMIT 1
@@ -80,12 +139,6 @@ def search_top_address_candidate(_conn, ci_row: dict) -> Optional[dict]:
         if _conn is None or not ci_row or not ci_row.get('CUSTOMER_FULL_DETAIL'):
             return None
         cur = _conn.cursor()
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
-        try:
-            cur.execute("USE WAREHOUSE COMPUTE_WH")
-        except Exception:
-            pass
 
         payload = {
             "query": ci_row.get('CUSTOMER_FULL_DETAIL'),
@@ -200,16 +253,6 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
             return { 'processed_rows': processed_rows, 'results': results, 'count': 0 }
 
         cur = _conn.cursor()
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
-        try:
-            cur.execute("USE WAREHOUSE COMPUTE_WH")
-        except Exception:
-            pass
 
         if callable(progress):
             try:
@@ -226,7 +269,7 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
                 CUSTOMER_BUSINESS_ID,
                 CUSTOMER_FULL_DETAIL,
                 CREATED_TIMESTAMP
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+            FROM CUSTOMER_IDENTIFIER
             WHERE ENRICHED_INDICATOR IS NULL
             ORDER BY CREATED_TIMESTAMP DESC
             LIMIT {int(limit)}
@@ -246,6 +289,11 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
         idx = 0
         for row in rows:
             idx += 1
+            # Initialize metrics to None at the start of each iteration
+            fetched_conf = None
+            fetched_edit = None
+            fetched_ver = None
+            
             if callable(progress):
                 try:
                     progress('row_start', index=idx, total=total)
@@ -260,15 +308,9 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
             # Persist SEARCH_CONFIDENCE_SCORE regardless
             cur2 = _conn.cursor()
             try:
-                cur2.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-                cur2.execute("USE SCHEMA PUBLIC")
-                try:
-                    cur2.execute("USE WAREHOUSE COMPUTE_WH")
-                except Exception:
-                    pass
                 cur2.execute(
                     """
-                    UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+                    UPDATE CUSTOMER_IDENTIFIER
                     SET SEARCH_CONFIDENCE_SCORE = %s
                     WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s
                     """,
@@ -285,11 +327,9 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
                 # Mark VALID based on search
                 cur3 = _conn.cursor()
                 try:
-                    cur3.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-                    cur3.execute("USE SCHEMA PUBLIC")
                     cur3.execute(
                         """
-                        UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+                        UPDATE CUSTOMER_IDENTIFIER
                         SET ENRICHED_INDICATOR = 'VALID'
                         WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s
                         """,
@@ -311,14 +351,37 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
                 # Ensure the in-memory row reflects the assigned BUSINESS_ID before display
                 ci['CUSTOMER_BUSINESS_ID'] = top.get('CUSTOMER_BUSINESS_ID')
                 any_valid = True
+
+                # Fetch updated metrics for display (vector CONFIDENCE_SCORE, EDIT_DISTANCE, VERIFICATION_MESSAGE)
+                fetched_conf = None
+                fetched_edit = None
+                fetched_ver = None
+                curm = _conn.cursor()
+                try:
+                    curm.execute(
+                        """
+                        SELECT CONFIDENCE_SCORE, EDIT_DISTANCE, VERIFICATION_MESSAGE
+                        FROM CUSTOMER_IDENTIFIER
+                        WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s
+                        LIMIT 1
+                        """,
+                        (ci['IDENTIFIER_TYPE'], ci['IDENTIFIER_VALUE'])
+                    )
+                    r = curm.fetchone()
+                    if r:
+                        fetched_conf, fetched_edit, fetched_ver = r[0], r[1], r[2]
+                finally:
+                    try:
+                        
+                        curm.close()
+                    except Exception:
+                        pass
             else:
                 cur4 = _conn.cursor()
                 try:
-                    cur4.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-                    cur4.execute("USE SCHEMA PUBLIC")
                     cur4.execute(
                         """
-                        UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+                        UPDATE CUSTOMER_IDENTIFIER
                         SET ENRICHED_INDICATOR = 'ERROR'
                         WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s
                         """,
@@ -332,6 +395,7 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
 
             processed_rows.append((ci['IDENTIFIER_TYPE'], ci['IDENTIFIER_VALUE']))
 
+            # Build display row including both search score and post-assignment metrics (if present)
             results.append({
                 'ENRICHED_INDICATOR': 'VALID' if score > threshold else 'ERROR',
                 'CUSTOMER_NAME': ci.get('CUSTOMER_NAME'),
@@ -339,7 +403,9 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
                 'IDENTIFIER_TYPE': ci.get('IDENTIFIER_TYPE'),
                 'CUSTOMER_FULL_DETAIL': ci.get('CUSTOMER_FULL_DETAIL'),
                 'SEARCH_CONFIDENCE_SCORE': score,
-                'CONFIDENCE_SCORE': None,  # vector similarity computed post-assignment only
+                'CONFIDENCE_SCORE': fetched_conf,
+                'EDIT_DISTANCE': fetched_edit,
+                'VERIFICATION_MESSAGE': fetched_ver,
                 'CREATED_TIMESTAMP': ci.get('CREATED_TIMESTAMP'),
             })
 
@@ -349,20 +415,12 @@ def process_unenriched_identifiers(_conn, threshold: float = 0.80, limit: int = 
                 except Exception:
                     pass
 
-        # If any VALID rows were set, run verification population per POPULATE_VERIFICATION_MESSAGE.sql
-        if any_valid:
+        # Verification is already populated per-row during assignment.
+        # Only signal progress if we actually assigned any rows this run.
+        if any_valid and callable(progress):
             try:
-                if callable(progress):
-                    try:
-                        progress('verify_start')
-                    except Exception:
-                        pass
-                run_populate_verification_message(_conn)
-                if callable(progress):
-                    try:
-                        progress('verify_end')
-                    except Exception:
-                        pass
+                progress('verify_start')
+                progress('verify_end')
             except Exception:
                 pass
 
@@ -380,20 +438,10 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
         if _conn is None or not identifier_type or not identifier_value or not customer_business_id:
             return False
         cur = _conn.cursor()
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
-        try:
-            cur.execute("USE WAREHOUSE COMPUTE_WH")
-        except Exception:
-            pass
 
         cur.execute(
             """
-            UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+            UPDATE CUSTOMER_IDENTIFIER
             SET CUSTOMER_BUSINESS_ID = %s
             WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s
             """,
@@ -403,9 +451,9 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
         # Compute vector cosine similarity for this CI row
         cur.execute(
             """
-            UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+            UPDATE CUSTOMER_IDENTIFIER ci
             SET CONFIDENCE_SCORE = VECTOR_COSINE_SIMILARITY(ca.CUSTOMER_FULL_DETAIL_EMBEDDING, ci.CUSTOMER_FULL_DETAIL_EMBEDDING)
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS ca
+            FROM CUSTOMER_ADDRESS ca
             WHERE ci.CUSTOMER_BUSINESS_ID = ca.CUSTOMER_BUSINESS_ID
               AND ci.IDENTIFIER_TYPE = %s AND ci.IDENTIFIER_VALUE = %s
             """,
@@ -416,9 +464,9 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
         try:
             cur.execute(
                 """
-                UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+                UPDATE CUSTOMER_IDENTIFIER ci
                 SET EDIT_DISTANCE = EDITDISTANCE(ci.CUSTOMER_FULL_DETAIL, ca.CUSTOMER_FULL_DETAIL)
-                FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS ca
+                FROM CUSTOMER_ADDRESS ca
                 WHERE ci.CUSTOMER_BUSINESS_ID = ca.CUSTOMER_BUSINESS_ID
                   AND ci.IDENTIFIER_TYPE = %s AND ci.IDENTIFIER_VALUE = %s
                 """,
@@ -429,7 +477,7 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
 
         cur.execute(
             """
-            UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+            UPDATE CUSTOMER_IDENTIFIER ci
             SET VERIFICATION_MESSAGE =
               CASE
                 WHEN ci.CONFIDENCE_SCORE = 1 THEN
@@ -497,7 +545,7 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
                     )
                   )
               END
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS ca
+            FROM CUSTOMER_ADDRESS ca
             WHERE ci.CUSTOMER_BUSINESS_ID = ca.CUSTOMER_BUSINESS_ID
               AND ci.IDENTIFIER_TYPE = %s AND ci.IDENTIFIER_VALUE = %s
             """,
@@ -513,16 +561,9 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
 def run_populate_verification_message(_conn) -> None:
     cur = _conn.cursor()
     try:
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE WAREHOUSE COMPUTE_WH")
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
         cur.execute(
             """
-            UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+            UPDATE CUSTOMER_IDENTIFIER ci
             SET VERIFICATION_MESSAGE = OBJECT_CONSTRUCT(
               'reason', 'Identical match',
               'name', TRUE,
@@ -536,17 +577,17 @@ def run_populate_verification_message(_conn) -> None:
               'country', TRUE,
               'phone', TRUE
             )
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS ca
+            FROM CUSTOMER_ADDRESS ca
             WHERE ci.CUSTOMER_BUSINESS_ID = ca.CUSTOMER_BUSINESS_ID
               AND ci.CONFIDENCE_SCORE = 1
             """
         )
         # Prefer the SQL procedure that updates ALL rows with non-null scores (not a random sample)
         try:
-            cur.execute("CALL MDM_CUSTOMER_MATCHING.PUBLIC.POPULATE_VERIFICATION_MESSAGE_SQL()")
+            cur.execute("CALL POPULATE_VERIFICATION_MESSAGE_SQL()")
         except Exception:
             # Fallback to legacy proc name if present
-            cur.execute("CALL MDM_CUSTOMER_MATCHING.PUBLIC.POPULATE_VERIFICATION_MESSAGE()")
+            cur.execute("CALL POPULATE_VERIFICATION_MESSAGE()")
     finally:
         try:
             cur.close()

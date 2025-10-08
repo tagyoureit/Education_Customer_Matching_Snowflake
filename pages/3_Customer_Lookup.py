@@ -1,10 +1,9 @@
 import os
 import json
-import toml
 import time
 import pandas as pd
 import streamlit as st
-import snowflake.connector
+from shared_utils import connect_to_snowflake
 
 
 st.set_page_config(
@@ -16,34 +15,7 @@ st.set_page_config(
 
 @st.cache_resource
 def get_snowflake_connection():
-    try:
-        connections_path = os.path.expanduser("~/.snowflake/connections.toml")
-        if os.path.exists(connections_path):
-            with open(connections_path, 'r') as f:
-                config = toml.load(f)
-                default_conn = config.get('default', {})
-                connection_params = {
-                    'account': default_conn.get('account'),
-                    'user': default_conn.get('user'),
-                    'password': default_conn.get('password'),
-                    'database': 'MDM_CUSTOMER_MATCHING',
-                    'schema': 'PUBLIC',
-                    'warehouse': 'COMPUTE_WH',
-                }
-        else:
-            connection_params = {
-                'account': os.getenv('SNOWFLAKE_ACCOUNT'),
-                'user': os.getenv('SNOWFLAKE_USER'),
-                'password': os.getenv('SNOWFLAKE_PASSWORD'),
-                'database': 'MDM_CUSTOMER_MATCHING',
-                'schema': 'PUBLIC',
-                'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
-            }
-
-        connection_params = {k: v for k, v in connection_params.items() if v is not None}
-        return snowflake.connector.connect(**connection_params)
-    except Exception:
-        return None
+    return connect_to_snowflake()
 
 
 @st.cache_data(show_spinner=False)
@@ -52,13 +24,7 @@ def cortex_search_top3(_conn, name_query: str):
         if _conn is None or not (name_query or '').strip():
             return []
         cur = _conn.cursor()
-        try:
-            cur.execute("USE ROLE MDM_CUSTOMER_MATCHING_ROLE")
-        except Exception:
-            pass
-        cur.execute("USE WAREHOUSE COMPUTE_WH")
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
+        
 
         payload = {
             "query": name_query,
@@ -153,13 +119,11 @@ def fetch_customer_address_by_id(_conn, customer_business_id: str) -> dict:
         if _conn is None or not customer_business_id:
             return {}
         cur = _conn.cursor()
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
         cur.execute(
             """
             SELECT CUSTOMER_BUSINESS_ID, CUSTOMER_NAME, ADDRESS_LINE_1, ADDRESS_LINE_2, CITY, COUNTY, STATE,
                    POSTAL_CODE, POSTALCODE_EXTENSION, COUNTRY, PHONE, CUSTOMER_FULL_DETAIL
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS
+            FROM CUSTOMER_ADDRESS
             WHERE CUSTOMER_BUSINESS_ID = %s
             LIMIT 1
             """,
@@ -184,8 +148,6 @@ def fetch_identifier_rows_for_name(_conn, name_like: str) -> pd.DataFrame:
         if _conn is None or not (name_like or '').strip():
             return pd.DataFrame()
         cur = _conn.cursor()
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
         like_val = f"%{name_like}%"
         cur.execute(
             """
@@ -198,8 +160,8 @@ def fetch_identifier_rows_for_name(_conn, name_like: str) -> pd.DataFrame:
                    ci.CUSTOMER_FULL_DETAIL,
                    ci.CONFIDENCE_SCORE,
                    ci.CREATED_TIMESTAMP
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS ca
-            INNER JOIN MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER ci
+            FROM CUSTOMER_ADDRESS ca
+            INNER JOIN CUSTOMER_IDENTIFIER ci
               ON ca.CUSTOMER_BUSINESS_ID = ci.CUSTOMER_BUSINESS_ID
             WHERE ca.CUSTOMER_NAME ILIKE %s
             ORDER BY ci.CREATED_TIMESTAMP DESC

@@ -55,7 +55,7 @@ function tweakPostalCode(postalCode) {
   if (!postalCode) return postalCode;
   var pc = '' + postalCode;
   var last = pc.charAt(pc.length - 1);
-  var choices = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  var choices = '0123456789';
   var replacement = last;
   while (replacement === last) {
     replacement = choices.charAt(Math.floor(Math.random() * choices.length));
@@ -295,20 +295,7 @@ var insertSql = `
   )
 ) AS CUSTOMER_FULL_DETAIL,
     AI_EMBED(
-      'snowflake-arctic-embed-m-v1.5',
-      RTRIM(
-  ARRAY_TO_STRING(
-    ARRAY_CONSTRUCT_COMPACT(
-      IFF(TRIM(base.CUSTOMER_NAME) = '', NULL, TRIM(base.CUSTOMER_NAME)),
-      IFF(TRIM(base.ADDRESS_LINE_1) = '', NULL, TRIM(base.ADDRESS_LINE_1)),
-      IFF(TRIM(base.ADDRESS_LINE_2) = '', NULL, TRIM(base.ADDRESS_LINE_2)),
-      IFF(TRIM(base.CITY) = '', NULL, TRIM(base.CITY)),
-      IFF(TRIM(base.STATE) = '', NULL, TRIM(base.STATE)),
-      IFF(TRIM(base.POSTAL_CODE) = '', NULL, TRIM(base.POSTAL_CODE))
-    ),
-    ', '
-  )
-)) AS CUSTOMER_FULL_DETAIL_EMBEDDING,
+      'snowflake-arctic-embed-m-v1.5', customer_full_detail ) AS CUSTOMER_FULL_DETAIL_EMBEDDING,
     CURRENT_TIMESTAMP(),
     null
   FROM (
@@ -330,9 +317,7 @@ var insertSql = `
       ? AS VERIFICATION_STATUS_CODE,
       CAST(? AS VARIANT) AS VERIFICATION_MESSAGE,
       ? AS ENRICHED_INDICATOR,
-      CAST(? AS FLOAT) AS CONFIDENCE_SCORE,
-      ? AS CUSTOMER_FULL_DETAIL,
-      ? AS CUSTOMER_FULL_DETAIL_EMBEDDING
+      CAST(? AS FLOAT) AS CONFIDENCE_SCORE
   ) base`;
 
 var totalInserted = 0;
@@ -356,14 +341,7 @@ for (var g = 0; g < generated.length; g++) {
     r.VERIFICATION_STATUS_CODE,
     r.VERIFICATION_MESSAGE,
     r.ENRICHED_INDICATOR,
-    r.CONFIDENCE_SCORE,
-    // Fields used to compute CUSTOMER_FULL_DETAIL
-    r.CUSTOMER_NAME,
-    r.ADDRESS_LINE_1,
-    r.ADDRESS_LINE_2,
-    r.CITY,
-    r.STATE,
-    r.POSTAL_CODE
+    r.CONFIDENCE_SCORE
   ];
   var stmt = snowflake.createStatement({ sqlText: insertSql, binds: binds });
   stmt.execute();

@@ -1,12 +1,12 @@
 import os
-import toml
+import pandas as pd
 import streamlit as st
-import snowflake.connector
-from shared_utils import process_unenriched_identifiers
+from datetime import datetime, timezone
+from shared_utils import process_unenriched_identifiers, connect_to_snowflake, get_session_context
 
 
 st.set_page_config(
-    page_title="Generate Samples & Assign",
+    page_title="Generate Samples & Simulate Data Pipeline",
     page_icon="🧰",
     layout="wide",
 )
@@ -14,47 +14,13 @@ st.set_page_config(
 
 @st.cache_resource
 def get_snowflake_connection():
-    try:
-        connections_path = os.path.expanduser("~/.snowflake/connections.toml")
-        if os.path.exists(connections_path):
-            with open(connections_path, 'r') as f:
-                config = toml.load(f)
-                default_conn = config.get('default', {})
-                connection_params = {
-                    'account': default_conn.get('account'),
-                    'user': default_conn.get('user'),
-                    'password': default_conn.get('password'),
-                    'database': 'MDM_CUSTOMER_MATCHING',
-                    'schema': 'PUBLIC',
-                    'warehouse': 'COMPUTE_WH',
-                }
-        else:
-            connection_params = {
-                'account': os.getenv('SNOWFLAKE_ACCOUNT'),
-                'user': os.getenv('SNOWFLAKE_USER'),
-                'password': os.getenv('SNOWFLAKE_PASSWORD'),
-                'database': 'MDM_CUSTOMER_MATCHING',
-                'schema': 'PUBLIC',
-                'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
-            }
-
-        connection_params = {k: v for k, v in connection_params.items() if v is not None}
-        return snowflake.connector.connect(**connection_params)
-    except Exception:
-        return None
+    return connect_to_snowflake()
 
 
 def call_generate_customer_samples(_conn):
     try:
         cur = _conn.cursor()
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE WAREHOUSE COMPUTE_WH")
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
-        cur.execute("CALL MDM_CUSTOMER_MATCHING.PUBLIC.GENERATE_CUSTOMER_SAMPLES()")
+        cur.execute("CALL GENERATE_CUSTOMER_SAMPLES()")
         row = cur.fetchone()
         cur.close()
         return row[0] if row else None
@@ -66,6 +32,60 @@ def call_generate_customer_samples(_conn):
         raise e
 
 
+def fetch_recent_generated(_conn, count_hint: int = 10):
+    try:
+        cur = _conn.cursor()
+        cur.execute(
+            """
+            SELECT 
+              IDENTIFIER_TYPE,
+              IDENTIFIER_VALUE,
+              CUSTOMER_NAME,
+              ADDRESS_ROLE,
+              CUSTOMER_FULL_DETAIL,
+              CUSTOMER_BUSINESS_ID,
+              ENRICHED_INDICATOR,
+              SEARCH_CONFIDENCE_SCORE,
+              CONFIDENCE_SCORE,
+              VERIFICATION_MESSAGE,
+              EDIT_DISTANCE,
+              CREATED_TIMESTAMP
+            FROM CUSTOMER_IDENTIFIER
+            ORDER BY CREATED_TIMESTAMP DESC
+            LIMIT %s
+            """,
+            (int(count_hint) if count_hint else 10,)
+        )
+        rows = cur.fetchall() or []
+        cur.close()
+        if not rows:
+            return None
+        cols = [
+            'IDENTIFIER_TYPE','IDENTIFIER_VALUE','CUSTOMER_NAME','ADDRESS_ROLE','CUSTOMER_FULL_DETAIL','CUSTOMER_BUSINESS_ID','ENRICHED_INDICATOR',
+            'SEARCH_CONFIDENCE_SCORE','CONFIDENCE_SCORE','VERIFICATION_MESSAGE','EDIT_DISTANCE','CREATED_TIMESTAMP'
+        ]
+        return pd.DataFrame(rows, columns=cols)
+    except Exception:
+        return None
+
+
+def on_click_generate_samples():
+    conn = get_snowflake_connection()
+    st.session_state.show_generation_bullets = True
+    st.session_state.generated_preview_df = None
+    st.session_state.gen_status = None
+    if conn is None:
+        st.session_state.gen_status = (False, "Snowflake connection not available. Set credentials or connections.toml.")
+        return
+    try:
+        inserted = call_generate_customer_samples(conn)
+        st.session_state.step1_done = True
+        st.session_state.gen_status = (True, f"Stored procedure completed. Inserted rows: {inserted}")
+        st.session_state.generated_preview_df = fetch_recent_generated(conn, inserted or 10)
+    except Exception as e:
+        st.session_state.gen_status = (False, f"Error: {e}")
+
+
 def main():
     st.title("🧰 Generate Samples & Assign")
 
@@ -74,10 +94,20 @@ def main():
         st.session_state.step1_done = False
     if 'step2_done' not in st.session_state:
         st.session_state.step2_done = False
+    if 'generated_preview_df' not in st.session_state:
+        st.session_state.generated_preview_df = None
+    if 'show_generation_bullets' not in st.session_state:
+        st.session_state.show_generation_bullets = False
+    if 'gen_status' not in st.session_state:
+        st.session_state.gen_status = None
 
     st.caption(
-        f"Step 1: Generate new sample CUSTOMER_IDENTIFIER rows via stored procedure. "
-        f"{'✅' if st.session_state.step1_done else ''}"
+        f"Step 1: Generate new sample CUSTOMER_IDENTIFIER rows via stored procedure. \n "
+        f"{'✅' if st.session_state.step1_done else ''}\n"
+        f"- Select 8 random base rows from `CUSTOMER_IDENTIFIER` and 2 from `PUBLIC_SCHOOLS`.\n"
+        f"- Generate slight/typo variations to simulate new identifiers.\n"
+        f"- Insert 10 rows into `CUSTOMER_IDENTIFIER` with: `CUSTOMER_FULL_DETAIL` and its embedding computed.\n"
+        f"- Leave these fields empty (to be populated later): `CUSTOMER_BUSINESS_ID`, `ENRICHED_INDICATOR`, `SEARCH_CONFIDENCE_SCORE`, `CONFIDENCE_SCORE`, `EDIT_DISTANCE`, `VERIFICATION_MESSAGE`.\n"
     )
 
     conn = get_snowflake_connection()
@@ -86,29 +116,42 @@ def main():
         return
 
     generate_col, _ = st.columns([1, 3])
-    with generate_col:
-        if st.button("Generate Samples", use_container_width=True):
-            with st.spinner("Generating sample CUSTOMER_IDENTIFIER rows and computing embeddings..."):
-                try:
-                    result = call_generate_customer_samples(conn)
-                    st.success(f"Stored procedure completed. Inserted rows: {result}")
-                    st.session_state.step1_done = True
-                except Exception as e:
-                    st.error(f"Error: {e}")
 
     
 
+    with generate_col:
+        st.button("Generate Samples", use_container_width=True, on_click=on_click_generate_samples)
+
+    status_tuple = st.session_state.get('gen_status')
+    if isinstance(status_tuple, tuple):
+        ok, msg = status_tuple
+        if ok:
+            st.success(msg)
+        else:
+            st.error(msg)
+
+    # Full-width preview area (separate from button column)
+    if isinstance(st.session_state.get('generated_preview_df'), pd.DataFrame) and not st.session_state.generated_preview_df.empty:
+        st.subheader("Preview of newly generated rows")
+        st.dataframe(st.session_state.generated_preview_df, use_container_width=True, hide_index=True)
+    elif st.session_state.step1_done:
+        st.caption("No newly generated rows found to preview.")
+
     st.divider()
     st.caption(
-        f"Step 2: Automatic matching via Cortex Search (uses search confidence score). "
-        f"{'✅' if st.session_state.step2_done else ''}"
+        f"Step 2: Automatic matching via Cortex Search (rough estimate of best match). \n"
+        f"{'✅' if st.session_state.step2_done else ''}\n"
+        f"- This will set the `ENRICHED_INDICATOR` to 'VALID' if the search confidence score is greater than the threshold. \n"
+        f"   - Set `CUSTOMER_BUSINESS_ID` of the top match.\n"
+        f"   - Compute `CONFIDENCE_SCORE`, `EDIT_DISTANCE` `CUSTOMER_FULL_DETAIL`, `VERIFICATION_MESSAGE`\n"
+        f"- This will set the `ENRICHED_INDICATOR` to 'ERROR' if the search confidence score is less than or equal to the threshold. \n"
     )
     proc_cols = st.columns([1,1,2])
     with proc_cols[0]:
         threshold = st.number_input("Search threshold", value=0.80, min_value=0.0, max_value=1.0, step=0.01, format="%.2f")
     with proc_cols[1]:
         limit = st.number_input("Max rows", value=100, min_value=1, max_value=10000, step=10)
-    if st.button("Process All Unenriched", use_container_width=True):
+    if st.button("Attempt to match to Golden Records", use_container_width=True):
         # Show only one live status at a time using a placeholder
         status_placeholder = st.empty()
         current = { 'status': None }
@@ -151,7 +194,7 @@ def main():
             summary = process_unenriched_identifiers(conn, threshold=threshold, limit=int(limit), progress=_progress)
             st.success(f"Processed {summary.get('count',0)} rows.")
             if summary.get('verification_ran'):
-                st.success("Verification populated for VALID rows via POPULATE_VERIFICATION_MESSAGE.sql")
+                st.success("Verification populated for VALID rows.")
             else:
                 st.caption("No VALID rows in this run; verification not executed.")
             st.session_state.step2_done = True

@@ -7,8 +7,7 @@ import pandas as pd
 import requests
 import sseclient
 import streamlit as st
-import snowflake.connector
-import toml
+from shared_utils import connect_to_snowflake
 
 from models import (
     ChartEventData,
@@ -36,36 +35,7 @@ st.set_page_config(
 
 @st.cache_resource
 def get_snowflake_connection():
-    """Create Snowflake connection using snow CLI config or environment variables."""
-    try:
-        connections_path = os.path.expanduser("~/.snowflake/connections.toml")
-        if os.path.exists(connections_path):
-            with open(connections_path, 'r') as f:
-                config = toml.load(f)
-                default_conn = config.get('default', {})
-                connection_params = {
-                    'account': default_conn.get('account'),
-                    'user': default_conn.get('user'),
-                    'password': default_conn.get('password'),
-                    'database': 'MDM_CUSTOMER_MATCHING',
-                    'schema': 'PUBLIC',
-                    'warehouse': 'COMPUTE_WH',
-                }
-        else:
-            connection_params = {
-                'account': os.getenv('SNOWFLAKE_ACCOUNT'),
-                'user': os.getenv('SNOWFLAKE_USER'),
-                'password': os.getenv('SNOWFLAKE_PASSWORD'),
-                'database': 'MDM_CUSTOMER_MATCHING',
-                'schema': 'PUBLIC',
-                'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
-            }
-
-        connection_params = {k: v for k, v in connection_params.items() if v is not None}
-        return snowflake.connector.connect(**connection_params)
-    except Exception as e:
-        st.error(f"Failed to connect to Snowflake: {str(e)}")
-        st.stop()
+    return connect_to_snowflake()
 
 
 def resolve_host(conn) -> str:

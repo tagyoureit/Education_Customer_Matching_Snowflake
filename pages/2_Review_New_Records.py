@@ -7,8 +7,7 @@ Review New Records Page - Scaffold
 
 import streamlit as st
 import os
-import toml
-import snowflake.connector
+from shared_utils import connect_to_snowflake
 import json
  
 
@@ -33,39 +32,7 @@ st.markdown(custom_css, unsafe_allow_html=True)
 
 @st.cache_resource
 def get_snowflake_connection():
-    """Create Snowflake connection using snow CLI config or environment variables.
-
-    Note: Connection is scaffolded here for later steps; this page currently avoids DB calls.
-    """
-    try:
-        connections_path = os.path.expanduser("~/.snowflake/connections.toml")
-        if os.path.exists(connections_path):
-            with open(connections_path, 'r') as f:
-                config = toml.load(f)
-                default_conn = config.get('default', {})
-                connection_params = {
-                    'account': default_conn.get('account'),
-                    'user': default_conn.get('user'),
-                    'password': default_conn.get('password'),
-                    'database': 'MDM_CUSTOMER_MATCHING',
-                    'schema': 'PUBLIC',
-                    'warehouse': 'COMPUTE_WH',
-                }
-        else:
-            connection_params = {
-                'account': os.getenv('SNOWFLAKE_ACCOUNT'),
-                'user': os.getenv('SNOWFLAKE_USER'),
-                'password': os.getenv('SNOWFLAKE_PASSWORD'),
-                'database': 'MDM_CUSTOMER_MATCHING',
-                'schema': 'PUBLIC',
-                'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
-            }
-
-        connection_params = {k: v for k, v in connection_params.items() if v is not None}
-        return snowflake.connector.connect(**connection_params)
-    except Exception:
-        # Defer error surfacing until we actually need the connection in later steps
-        return None
+    return connect_to_snowflake()
 
  
 
@@ -80,12 +47,6 @@ def get_top3_candidates_for_ci(_conn, ci_row: dict):
         if _conn is None or not ci_row or not ci_row.get('CUSTOMER_FULL_DETAIL'):
             return []
         cur = _conn.cursor()
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
-        try:
-            cur.execute("USE WAREHOUSE COMPUTE_WH")
-        except Exception:
-            pass
 
         # Build query from the canonical full-detail text
         query_str = (ci_row.get('CUSTOMER_FULL_DETAIL') or '').strip()
@@ -189,17 +150,12 @@ def get_unassigned_ci_keys(_conn):
         if _conn is None:
             return []
         cur = _conn.cursor()
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
+        cur = _conn.cursor()
         rows = []
         cur.execute(
             """
             SELECT IDENTIFIER_TYPE, IDENTIFIER_VALUE
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+            FROM CUSTOMER_IDENTIFIER
             WHERE CUSTOMER_BUSINESS_ID IS NULL
             ORDER BY CREATED_TIMESTAMP DESC
             """
@@ -219,12 +175,7 @@ def get_ci_by_key(_conn, identifier_type: str, identifier_value: str):
         if _conn is None or not identifier_type or not identifier_value:
             return None
         cur = _conn.cursor()
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
+        cur = _conn.cursor()
         cur.execute(
             """
             SELECT 
@@ -242,7 +193,7 @@ def get_ci_by_key(_conn, identifier_type: str, identifier_value: str):
                 PHONE,
                 CUSTOMER_FULL_DETAIL,
                 CREATED_TIMESTAMP
-            FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_IDENTIFIER
+            FROM CUSTOMER_IDENTIFIER
             WHERE IDENTIFIER_TYPE = %s AND IDENTIFIER_VALUE = %s
             LIMIT 1
             """,
@@ -272,16 +223,7 @@ def assign_ci_to_business_id(_conn, identifier_type: str, identifier_value: str,
             return False
         cur = _conn.cursor()
         # Context
-        try:
-            cur.execute("USE ROLE SYSADMIN")
-        except Exception:
-            pass
-        cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-        cur.execute("USE SCHEMA PUBLIC")
-        try:
-            cur.execute("USE WAREHOUSE COMPUTE_WH")
-        except Exception:
-            pass
+        cur = _conn.cursor()
 
         # 1) Assign BUSINESS ID
         cur.execute(
@@ -424,8 +366,7 @@ def create_new_id_and_assign(_conn, ci_row: dict):
 
         # Generate a new id in-app and reuse across statements
         cur.execute(
-            "SELECT MDM_CUSTOMER_MATCHING.PUBLIC.GENERATE_CUSTOMER_BUSINESS_ID("
-            "MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_BUSINESS_ID_SEQ.NEXTVAL)"
+            "SELECT GENERATE_CUSTOMER_BUSINESS_ID(CUSTOMER_BUSINESS_ID_SEQ.NEXTVAL)"
         )
         row_id = cur.fetchone()
         if not row_id or not row_id[0]:
@@ -448,7 +389,7 @@ def create_new_id_and_assign(_conn, ci_row: dict):
         try:
             cur.execute(
                 """
-                INSERT INTO MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS (
+                INSERT INTO CUSTOMER_ADDRESS (
                   CUSTOMER_BUSINESS_ID, CUSTOMER_NAME, ADDRESS_LINE_1, ADDRESS_LINE_2, CITY, COUNTY, STATE,
                   POSTAL_CODE, POSTALCODE_EXTENSION, COUNTRY, PHONE, CUSTOMER_FULL_DETAIL
                 )
@@ -467,7 +408,7 @@ def create_new_id_and_assign(_conn, ci_row: dict):
             # Fallback: insert without the column, then update it
             cur.execute(
                 """
-                INSERT INTO MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS (
+                INSERT INTO CUSTOMER_ADDRESS (
                   CUSTOMER_BUSINESS_ID, CUSTOMER_NAME, ADDRESS_LINE_1, ADDRESS_LINE_2, CITY, COUNTY, STATE,
                   POSTAL_CODE, POSTALCODE_EXTENSION, COUNTRY, PHONE
                 )
@@ -483,7 +424,7 @@ def create_new_id_and_assign(_conn, ci_row: dict):
             try:
                 cur.execute(
                     """
-                    UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS
+                    UPDATE CUSTOMER_ADDRESS
                     SET CUSTOMER_FULL_DETAIL = %s
                     WHERE CUSTOMER_BUSINESS_ID = %s
                     """,
@@ -496,7 +437,7 @@ def create_new_id_and_assign(_conn, ci_row: dict):
         try:
             cur.execute(
                 """
-                UPDATE MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS
+                UPDATE CUSTOMER_ADDRESS
                 SET CUSTOMER_FULL_DETAIL_EMBEDDING = AI_EMBED('snowflake-arctic-embed-m-v1.5', CUSTOMER_FULL_DETAIL)
                 WHERE CUSTOMER_BUSINESS_ID = %s
                 """,
@@ -639,12 +580,10 @@ def on_create_new_id_click():
         # Verify with SELECT as requested
         try:
             cur = conn.cursor()
-            cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
-            cur.execute("USE SCHEMA PUBLIC")
             like_val = f"%{(st.session_state.current_ci.get('CUSTOMER_NAME') or '').title()}%"
             cur.execute(
                 "SELECT CUSTOMER_BUSINESS_ID, CUSTOMER_NAME, ADDRESS_LINE_1, CITY, STATE, POSTAL_CODE\n"
-                "FROM MDM_CUSTOMER_MATCHING.PUBLIC.CUSTOMER_ADDRESS\n"
+                "FROM CUSTOMER_ADDRESS\n"
                 "WHERE CUSTOMER_NAME ILIKE %s\n"
                 "LIMIT 10",
                 (like_val,)
