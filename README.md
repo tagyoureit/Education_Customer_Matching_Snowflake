@@ -68,7 +68,7 @@ snow sql -f SQL/07_MDM_Matching_Agent.sql
 If you have snapshot files staged on `@MDM_DEMO_STAGE/exports/`, load them:
 
 ```bash
-snow sql -f SQL/02_LOAD_DATA_STAGE.sql
+snow sql -f SQL/02_LOAD_DATA.sql
 ```
 
 This loads `CUSTOMER_ADDRESS` and `CUSTOMER_IDENTIFIER` tables from staged JSON exports.
