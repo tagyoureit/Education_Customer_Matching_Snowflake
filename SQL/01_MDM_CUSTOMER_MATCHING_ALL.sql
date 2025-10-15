@@ -6,6 +6,18 @@ USE DATABASE MDM_CUSTOMER_MATCHING;
 USE SCHEMA PUBLIC;  -- @Snowflake Docs
 
 -- -----------------------------------------------------------------------------
+-- Stage for data files (with directory table for metadata tracking)
+-- -----------------------------------------------------------------------------
+CREATE STAGE IF NOT EXISTS MDM_DEMO_STAGE
+  DIRECTORY = (ENABLE = TRUE)
+  COMMENT = 'Stage for MDM demo data files and exports';
+
+CREATE FILE FORMAT IF NOT EXISTS MDM_JSONL_FF
+  TYPE = JSON
+  COMPRESSION = GZIP
+  COMMENT = 'JSON Lines format with GZIP compression';
+
+-- -----------------------------------------------------------------------------
 -- Sequence and UDF for CUSTOMER_BUSINESS_ID
 -- -----------------------------------------------------------------------------
 CREATE SEQUENCE IF NOT EXISTS CUSTOMER_BUSINESS_ID_SEQ

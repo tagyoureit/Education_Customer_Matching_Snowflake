@@ -359,8 +359,10 @@ def create_new_id_and_assign(_conn, ci_row: dict):
             pass
         cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
         cur.execute("USE SCHEMA PUBLIC")
+        # Use configurable warehouse (falls back to connection default)
+        warehouse = os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH')
         try:
-            cur.execute("USE WAREHOUSE COMPUTE_WH")
+            cur.execute(f"USE WAREHOUSE {warehouse}")
         except Exception:
             pass
 

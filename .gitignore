@@ -165,6 +165,9 @@ cython_debug/
 # Streamlit
 .streamlit/
 
+# Playwright MCP
+.playwright-mcp/
+
 # Snowflake
 *.toml
 connections.toml

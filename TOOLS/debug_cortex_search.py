@@ -17,7 +17,7 @@ def get_conn():
                 'password': default_conn.get('password'),
                 'database': 'MDM_CUSTOMER_MATCHING',
                 'schema': 'PUBLIC',
-                'warehouse': 'COMPUTE_WH',
+                'warehouse': default_conn.get('warehouse') or os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH'),
             }
     else:
         params = {
@@ -65,7 +65,8 @@ def main():
             cur.execute("USE ROLE SYSADMIN")
         except Exception:
             pass
-        cur.execute("USE WAREHOUSE COMPUTE_WH")
+        warehouse = os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH')
+        cur.execute(f"USE WAREHOUSE {warehouse}")
         cur.execute("USE DATABASE MDM_CUSTOMER_MATCHING")
         cur.execute("USE SCHEMA PUBLIC")
 

@@ -45,7 +45,7 @@ def get_snowflake_connection() -> snowflake.connector.SnowflakeConnection:
                 'password': default_conn.get('password'),
                 'database': 'MDM_CUSTOMER_MATCHING',
                 'schema': 'PUBLIC',
-                'warehouse': default_conn.get('warehouse', 'COMPUTE_WH')
+                'warehouse': default_conn.get('warehouse') or os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH')
             }
     else:
         # Fallback to environment variables

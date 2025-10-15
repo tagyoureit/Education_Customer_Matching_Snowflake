@@ -6,12 +6,16 @@ This guide helps others replicate the working demo in their own Snowflake accoun
 
 ### Snowflake Requirements
 - Snow CLI installed and authenticated (default profile)
-- Warehouse: `COMPUTE_WH` (or set env var `MDM_WH`)
+- **Warehouse**: Must have a warehouse available (defaults to `COMPUTE_WH`)
+  - To use a different warehouse, set the `MDM_WH` environment variable before running setup
+  - Example: `export MDM_WH=MY_WAREHOUSE_NAME`
+  - The warehouse must exist and your user must have USAGE privileges on it
 - **ACCOUNTADMIN role** (for initial database and role setup)
 - The setup script will create:
   - Database: `MDM_CUSTOMER_MATCHING`
   - Role: `MDM_CUSTOMER_MATCHING_ROLE` with all necessary privileges
   - Database: `SNOWFLAKE_INTELLIGENCE` (for Cortex Agents)
+  - Stage: `MDM_DEMO_STAGE` (for data files and exports)
 
 ### Python Requirements
 - Python 3.8 or higher
@@ -20,6 +24,20 @@ This guide helps others replicate the working demo in their own Snowflake accoun
 ---
 
 ## 1) One-Time Setup in Target Account
+
+### Validate Prerequisites (Recommended)
+
+Before running setup, validate your environment:
+
+```bash
+bash scripts/validate_setup.sh
+```
+
+This will check:
+- Snow CLI installation and authentication
+- Warehouse availability and access
+- Role privileges (ACCOUNTADMIN required)
+- Python installation
 
 ### Automated Setup (Recommended)
 
@@ -147,7 +165,13 @@ snow sql -f SQL/POPULATE_VERIFICATION_MESSAGE.sql
 
 ## Troubleshooting
 
+- **Warehouse Not Found:** If you get errors about warehouse not existing:
+  - Verify the warehouse name: `SHOW WAREHOUSES;` in Snowflake
+  - Set the correct warehouse: `export MDM_WH=YOUR_WAREHOUSE_NAME`
+  - Ensure you have USAGE privileges on the warehouse
 - **Permission Errors:** Ensure your role has sufficient privileges for all object types (see Prerequisites)
-- **Agent Creation Fails:** Verify that all stored procedures (steps 05-07) were created successfully before running step 04
-- **Missing Embeddings:** Run `SQL/03_UPDATE_CUSTOMER_FULL_DETAIL.sql` to regenerate embeddings and confidence scores
+- **Stage Not Found (02_LOAD_DATA.sql):** If running SQL files manually instead of using `setup.sh`, ensure you run `01_MDM_CUSTOMER_MATCHING_ALL.sql` first, which creates the `MDM_DEMO_STAGE` stage
+- **Agent Creation Fails:** Verify that all stored procedures were created successfully before creating the agent
+- **Missing Embeddings:** Run `SQL/06_UPDATE_CUSTOMER_FULL_DETAIL.sql` to regenerate embeddings and confidence scores
 - **Python Dependencies:** If you encounter package conflicts, try creating a fresh virtual environment
+- **Missing snowpark-python:** Run `pip install snowflake-snowpark-python>=1.11.0` if you get import errors
